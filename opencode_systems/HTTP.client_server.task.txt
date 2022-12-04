@@ -1,0 +1,38 @@
+Use Boost ASIO to implement HTTP Client & HTTP Server (http standard 1.1)
+
+Client and Server should be able to process POST and HEAD requests/responses.
+1. POST request/response
+[ HTTP client ] ---POST request---> [ HTTP server ]
+[ HTTP client ] <---POST response--- [ HTTP server ]
+
+2. HEAD request/response
+[ HTTP client ] ---HEAD request---> [ HTTP server ]
+[ HTTP client ] <---HEAD response--- [ HTTP server ]
+
+HTTP Client
+------------
+Start HTTP Client with parameters:
+1. --host=hostname - the host of HTTP server
+2. --port=portnumber - the port of HTTP server
+3. --keep-alive=XX - run HTTP client with keep-alive HEAD requests every XX seconds
+4. --post-request=XX - send HTTP POST request every XX seconds.
+5. --reload=XX - every XX seconds reload the file where the Request is stored.
+6. --request=/path/to/Request.json - path to Request.html used by client to send to the Server.
+
+
+HTTP Server
+------------
+Start HTTP Server with parameters:
+1. --port=portnumber - the number of listener port
+2. --reload=XX - every XX seconds reload the file where the HTTP Response is stored and use it when process next HTTP Requests
+3. --response=/path/to/Response.json - path to Response.html used by server when receive Response from client.
+
+HTTP Server Save every request into separate file with following Name:
+- server port
+- client port
+- timestamp of incomming request YYYYMMDDHHmmSS (20220325094500)
+example: 80_10200_20220325094500.txt
+
+HTTP Server receive Request from HTTP Client, then read response from --response source and send it back to the client.
+
+
