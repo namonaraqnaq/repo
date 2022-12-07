@@ -1,5 +1,7 @@
 // http_server.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
+//#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/date_time.hpp>
 #include <boost/regex.hpp> 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -19,6 +21,7 @@
 #include <thread>
 #include <vector>
 #include <map>
+#include <queue>
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -76,6 +79,46 @@ private:
 	unique_ptr<stringstream> pbuff_;
 	unique_ptr<stringstream> pbuff_back_;
 };
+
+struct request_data {
+	boost::posix_time::ptime timestamp_;
+	string server_port_;
+	string client_port_;	
+	string data_;
+};
+
+class request_data_q {
+	std::queue<request_data> queue_;
+	mutable std::mutex mutex_;
+public:
+	request_data_q() = default;
+	request_data_q(const request_data_q&) = delete;
+	request_data_q& operator=(const request_data_q&) = delete;
+	~request_data_q() {}
+
+	void pop() {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (queue_.empty()) {
+			return;
+		}
+		request_data dt = queue_.front();
+		string tms = to_iso_string(dt.timestamp_);
+		tms = tms.substr(0, tms.find("."));
+		string filename =	dt.server_port_ + 
+			"_" + dt.client_port_ + "_" + 
+			tms + ".txt";
+
+		ofstream outfile(filename.c_str());
+		outfile << dt.data_;
+		queue_.pop();
+	}
+
+	void push(const request_data &item) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		queue_.push(item);
+	}
+} request_data_q_;
+
 
 beast::string_view mime_type(beast::string_view path)
 {
@@ -381,6 +424,6 @@ int main(int argc, char *argv[])
 	if (!resp_buff.good()) {
 		cerr << "bad path_to_response" << endl;
 		return input_params_error();
-	}
-	return EXIT_SUCCESS;
+	}	
 }
+
