@@ -29,31 +29,6 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 using namespace std;
 
-// Return a reasonable mime type based on the extension of a file.
-const map<string, string> _mimes = {
-	{".htm","text/html"},
-	{".html","text/html"},
-	{".php","text/html"},
-	{".css","text/css"},
-	{".txt","text/plain"},
-	{".js","application/javascript"},
-	{".json", "application/json"},
-	{".xml", "application/xml"},
-	{".swf", "application/x-shockwave-flash"},
-	{".flv", "video/x-flv"},
-	{".png", "image/png"},
-	{".jpe", "image/jpeg"},
-	{".jpeg", "image/jpeg"},
-	{".jpg", "image/jpeg"},
-	{".gif", "image/gif"},
-	{".bmp", "image/bmp"},
-	{".ico", "image/vnd.microsoft.icon"},
-	{".tiff", "image/tiff"},
-	{".tif", "image/tiff"},
-	{".svg", "image/svg+xml"},
-	{".svgz", "image/svg+xml"}
-};
-
 class response_buffer {
 public:
 	response_buffer(const char* path) :
@@ -79,6 +54,8 @@ private:
 	unique_ptr<stringstream> pbuff_;
 	unique_ptr<stringstream> pbuff_back_;
 };
+
+unique_ptr<response_buffer> resp_buff_ = nullptr;
 
 struct request_data {
 	boost::posix_time::ptime timestamp_;
@@ -119,17 +96,6 @@ public:
 	}
 } request_data_q_;
 
-
-beast::string_view mime_type(beast::string_view path)
-{
-	auto const ext = [&path] {
-		auto const pos = path.rfind(".");
-		return pos == beast::string_view::npos ? beast::string_view{} : path.substr(pos);
-	}();	
-	auto mime = _mimes.find(ext);
-	return mime != _mimes.end() ? mime->second : "application/text";
-}
-
 // Append an HTTP rel-path to a local filesystem path.
 // The returned path is normalized for the platform.
 std::string path_cat(beast::string_view base, beast::string_view path)
@@ -159,7 +125,7 @@ std::string path_cat(beast::string_view base, beast::string_view path)
 template <class Body, class Allocator>
 http::message_generator handle_request(	beast::string_view doc_root,
 										http::request<Body, http::basic_fields<Allocator>>&& req)
-{
+{	
 	// Returns a bad request response
 	auto const bad_request = [&req](beast::string_view why) {
 		http::response<http::string_body> res{ http::status::bad_request, req.version() };
@@ -169,29 +135,9 @@ http::message_generator handle_request(	beast::string_view doc_root,
 		res.body() = std::string(why);
 		res.prepare_payload();
 		return res;
-	};
-	// Returns a not found response
-	auto const not_found = [&req](beast::string_view target) {
-		http::response<http::string_body> res { http::status::not_found, req.version() };
-		res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-		res.set(http::field::content_type, "text/html");
-		res.keep_alive(req.keep_alive());
-		res.body() = "The resource '" + std::string(target) + "' was not found.";
-		res.prepare_payload();
-		return res;
-	};
-	// Returns a server error response
-	auto const server_error = [&req](beast::string_view what) {
-		http::response<http::string_body> res { http::status::internal_server_error, req.version() };
-		res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-		res.set(http::field::content_type, "text/html");
-		res.keep_alive(req.keep_alive());
-		res.body() = "An error occurred: '" + std::string(what) + "'";
-		res.prepare_payload();
-		return res;
-	};
+	};	
 	// Make sure we can handle the method
-	if (req.method() != http::verb::get &&
+	if (req.method() != http::verb::post &&
 		req.method() != http::verb::head)
 		return bad_request("Unknown HTTP-method");
 	// Request path must be absolute and not contain "..".
@@ -199,38 +145,24 @@ http::message_generator handle_request(	beast::string_view doc_root,
 		req.target()[0] != '/' ||
 		req.target().find("..") != beast::string_view::npos)
 		return bad_request("Illegal request-target");
-	// Build the path to the requested file
-	std::string path = path_cat(doc_root, req.target());
-	if (req.target().back() == '/')
-		path.append("index.html");
-	// Attempt to open the file
-	beast::error_code ec;
-	http::file_body::value_type body;
-	body.open(path.c_str(), beast::file_mode::scan, ec);
-	// Handle the case where the file doesn't exist
-	if (ec == beast::errc::no_such_file_or_directory)
-		return not_found(req.target());
-	// Handle an unknown error
-	if (ec)
-		return server_error(ec.message());
-	// Cache the size since we need it after the move
-	auto const size = body.size();
 	// Respond to HEAD request
 	if (req.method() == http::verb::head) {
 		http::response<http::empty_body> res{ http::status::ok, req.version() };
 		res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-		res.set(http::field::content_type, mime_type(path));
-		res.content_length(size);
+		res.set(http::field::content_type, "text/html");
+		res.content_length(0);
 		res.keep_alive(req.keep_alive());
 		return res;
 	}
 	// Respond to GET request
-	http::response<http::file_body> res { std::piecewise_construct,
-										  std::make_tuple(std::move(body)),
-										  std::make_tuple(http::status::ok, req.version()) };
+	static std::string const payload(resp_buff_->str());
+	http::response<http::string_body> res; 
+	res.result(http::status::ok);
+	res.version(11);
 	res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-	res.set(http::field::content_type, mime_type(path));
-	res.content_length(size);
+	res.set(http::field::content_type, "text/html");	
+	res.content_length(payload.size());
+	res.body() = payload;	
 	res.keep_alive(req.keep_alive());
 	return res;
 }
@@ -247,6 +179,7 @@ class http_session : public std::enable_shared_from_this<http_session>
 	beast::flat_buffer buffer_;
 	std::shared_ptr<std::string const> doc_root_;
 	http::request<http::string_body> req_;
+	request_data rd_;
 
 public:
 	// Take ownership of the stream
@@ -254,6 +187,8 @@ public:
 		: stream_(std::move(socket))
 		, doc_root_(doc_root)
 	{
+		rd_.server_port_ = std::to_string(socket.local_endpoint().port());
+		rd_.client_port_ = std::to_string(socket.remote_endpoint().port());
 	}
 	// Start the asynchronous operation
 	void run()
@@ -294,6 +229,12 @@ public:
 			return do_close();
 		if (ec)
 			return report_failure(ec, "read");
+		
+		// Write request
+		rd_.timestamp_ = boost::posix_time::second_clock::local_time();
+		rd_.data_ = req_.body();
+		request_data_q_.push(rd_);
+
 		// Send the response
 		send_response(handle_request(*doc_root_, std::move(req_)));
 	}	
@@ -326,10 +267,12 @@ class listener : public std::enable_shared_from_this<listener>
 {
 	net::io_context& ioc_;
 	tcp::acceptor acceptor_;
-	std::shared_ptr<std::string const> doc_root_;
-
+	shared_ptr<string const> doc_root_;
+	
 public:
-	listener(net::io_context& ioc, tcp::endpoint endpoint, std::shared_ptr<std::string const> const& doc_root)
+	listener(	net::io_context& ioc, 
+				tcp::endpoint endpoint, 
+				shared_ptr<string const> const& doc_root)
 		: ioc_(ioc)
 		, acceptor_(net::make_strand(ioc))
 		, doc_root_(doc_root)
@@ -396,6 +339,19 @@ static int input_params_error() {
 	return EXIT_FAILURE;
 }
 
+static void update_resp_buffer(net::io_context& ioc, unsigned short reload_secs)
+{
+	do {
+		std::this_thread::sleep_for(std::chrono::milliseconds(reload_secs*1000));
+	} while (!ioc.stopped());
+}
+
+static void write_responses(net::io_context& ioc) {
+	do {
+		request_data_q_.pop();
+	} while (!ioc.stopped());
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc != 4) {
@@ -410,20 +366,35 @@ int main(int argc, char *argv[])
 		}
 		settings[cm[1].str()] = cm[2].str();
 	}
-
-	const auto port(settings["port"]);
-	if (port.empty()) {
+	
+	if (settings["port"].empty()) {
 		return input_params_error();
-	}
+	}	
+	const auto port = static_cast<unsigned short>(atoi(settings["port"].c_str()));
+	auto const address = net::ip::make_address("127.0.0.1");
+	auto const doc_root = std::make_shared<std::string>(".");
+
 	const auto reload_secs = atoi(settings["reload"].c_str());
 	if (reload_secs <= 0) {
 		return input_params_error();
 	}
-
-	response_buffer resp_buff(settings["response"].c_str());
-	if (!resp_buff.good()) {
+	resp_buff_ = make_unique<response_buffer>(settings["response"].c_str());
+	if (!resp_buff_->good()) {
 		cerr << "bad path_to_response" << endl;
 		return input_params_error();
-	}	
+	}
+	
+	net::io_context ioc;
+	// Create and launch a listening port
+	std::make_shared<listener>(
+		ioc,
+		tcp::endpoint{ address, port },
+		doc_root)->run();
+	ioc.run();
+
+	thread(write_responses, std::ref(ioc)).join();
+	thread(update_resp_buffer, std::ref(ioc), reload_secs).join();
+
+	return EXIT_SUCCESS;
 }
 
