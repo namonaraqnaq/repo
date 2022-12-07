@@ -140,11 +140,9 @@ http::message_generator handle_request(	beast::string_view doc_root,
 	if (req.method() != http::verb::post &&
 		req.method() != http::verb::head)
 		return bad_request("Unknown HTTP-method");
-	// Request path must be absolute and not contain "..".
-	if (req.target().empty() ||
-		req.target()[0] != '/' ||
-		req.target().find("..") != beast::string_view::npos)
-		return bad_request("Illegal request-target");
+	// Request path must be empty in our case.
+	if (!req.target().empty())
+		return bad_request("Illegal request-target. Must be empty");
 	// Respond to HEAD request
 	if (req.method() == http::verb::head) {
 		http::response<http::empty_body> res{ http::status::ok, req.version() };
@@ -154,7 +152,7 @@ http::message_generator handle_request(	beast::string_view doc_root,
 		res.keep_alive(req.keep_alive());
 		return res;
 	}
-	// Respond to GET request
+	// Respond to POST request
 	static std::string const payload(resp_buff_->str());
 	http::response<http::string_body> res; 
 	res.result(http::status::ok);
@@ -343,12 +341,16 @@ static void update_resp_buffer(net::io_context& ioc, unsigned short reload_secs)
 {
 	do {
 		std::this_thread::sleep_for(std::chrono::milliseconds(reload_secs*1000));
+		cout << "update_resp_buffer ";
+		resp_buff_->reload();
 	} while (!ioc.stopped());
 }
 
 static void write_responses(net::io_context& ioc) {
 	do {
 		request_data_q_.pop();
+		cout << "write_responses ";
+		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	} while (!ioc.stopped());
 }
 
@@ -384,16 +386,17 @@ int main(int argc, char *argv[])
 		return input_params_error();
 	}
 	
-	net::io_context ioc;
+	net::io_context ioc;	
+	thread tw(write_responses, std::ref(ioc));
+	thread tu(update_resp_buffer, std::ref(ioc), reload_secs);
 	// Create and launch a listening port
 	std::make_shared<listener>(
 		ioc,
 		tcp::endpoint{ address, port },
 		doc_root)->run();
 	ioc.run();
-
-	thread(write_responses, std::ref(ioc)).join();
-	thread(update_resp_buffer, std::ref(ioc), reload_secs).join();
+	tw.join();
+	tu.join();	
 
 	return EXIT_SUCCESS;
 }

@@ -1,6 +1,8 @@
 // http_client.cpp : This file contains the 'main' function. Program execution begins and ends there.
 // and implements asynchronous http client 
 //
+#include <boost/asio.hpp>
+#include <boost/bind.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -47,6 +49,8 @@ private:
 	unique_ptr<stringstream> pbuff_back_;
 };
 
+unique_ptr<request_buffer> req_buff_ = nullptr;
+
 static void report_failure(beast::error_code err, char const* src)
 {
 	std::cerr << src << ": " << err.message() << "\n";
@@ -56,29 +60,48 @@ static void report_failure(beast::error_code err, char const* src)
 class http_session 
 	: public std::enable_shared_from_this<http_session>
 {
+	const unsigned short keep_alive_secs_;
+	const unsigned short post_req_secs_;
 	tcp::resolver resolver_;
 	beast::tcp_stream stream_;
 	beast::flat_buffer buffer_; // (Must persist between reads)
-	http::request<http::empty_body> req_;
+	http::request<http::string_body> head_req_;
+	http::request<http::string_body> post_req_;
 	http::response<http::string_body> res_;
+	
+	net::io_context& ioc_;
 
 public:
 	// Objects are constructed with a strand to
 	// ensure that handlers do not execute concurrently.
-	explicit http_session(net::io_context& ioc)
-		: resolver_(net::make_strand(ioc))
+	explicit http_session(net::io_context& ioc, unsigned short keep_alove_secs, unsigned short post_req_secs)
+		: keep_alive_secs_(keep_alove_secs)
+		, post_req_secs_(post_req_secs)
+		, resolver_(net::make_strand(ioc))
 		, stream_(net::make_strand(ioc))
+		, ioc_(ioc)
 	{
 	}
 
 	// Start the asynchronous operation
-	void run(char const* host, char const* port, char const* target)
+	void run(char const* host, char const* port)
 	{
 		// Set up an HTTP GET request message
-		req_.method(http::verb::get);
-		req_.target(target);
-		req_.set(http::field::host, host);
-		req_.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+		std::string const payload("keep_alive");
+		post_req_.content_length(payload.size());
+		post_req_.body() = payload;
+
+		head_req_.version(11);
+		head_req_.method(http::verb::head);
+		head_req_.set(http::field::host, host);
+		head_req_.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+		head_req_.keep_alive(true);
+		
+		post_req_.version(11);
+		post_req_.method(http::verb::post);
+		post_req_.set(http::field::host, host);
+		post_req_.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+		post_req_.keep_alive(true);
 
 		// Look up the domain name
 		resolver_.async_resolve(host, port,
@@ -98,17 +121,71 @@ public:
 				beast::bind_front_handler(&http_session::on_connect, shared_from_this()));
 	}
 
+	void do_head_request() {
+		net::deadline_timer tmr(ioc_, boost::posix_time::seconds(15));
+		tmr.async_wait(beast::bind_front_handler(&http_session::head_request, shared_from_this()));
+		//tmr.async_wait(boost::bind(&http_session::post_request, this, boost::asio::placeholders::error));
+	}
+
+	void head_request(beast::error_code err) {
+		if (err) {
+			report_failure(err, "head request");
+			// Close the socket
+			stream_.socket().shutdown(tcp::socket::shutdown_both, err);
+			// not_connected happens sometimes so don't bother reporting it.
+			if (err && err != beast::errc::not_connected)
+				return report_failure(err, "shutdown");
+			// If we get here then the connection is closed gracefully
+			return;
+		}
+		// Set a timeout on the operation
+		stream_.expires_after(std::chrono::seconds(30));
+
+		// Send the HTTP request to the remote host	
+		http::async_write(stream_, head_req_,
+			beast::bind_front_handler(&http_session::on_write, shared_from_this()));
+
+		do_head_request();
+	}
+
+	void do_post_request() {
+		net::deadline_timer tmr(ioc_, boost::posix_time::seconds(5));
+		tmr.async_wait(beast::bind_front_handler(&http_session::post_request, shared_from_this()));
+		//tmr.async_wait(boost::bind(&http_session::post_request, this, boost::asio::placeholders::error));
+	}
+
+	void post_request(beast::error_code err) {
+		if (err) {
+			report_failure(err, "post request");
+			// Close the socket
+			stream_.socket().shutdown(tcp::socket::shutdown_both, err);
+			// not_connected happens sometimes so don't bother reporting it.
+			if (err && err != beast::errc::not_connected)
+				return report_failure(err, "shutdown");
+			// If we get here then the connection is closed gracefully
+			return;
+		}
+		// Set a timeout on the operation
+		stream_.expires_after(std::chrono::seconds(30));
+
+		std::string const payload(req_buff_->str());
+		post_req_.content_length(payload.size());
+		post_req_.body() = payload;
+
+		// Send the HTTP request to the remote host
+		http::async_write(stream_, post_req_,
+			beast::bind_front_handler(&http_session::on_write, shared_from_this()));
+		
+		do_post_request();
+	}
+
 	void on_connect(beast::error_code err, tcp::resolver::results_type::endpoint_type)
 	{
 		if (err) {
 			return report_failure(err, "connect");
 		}
-		// Set a timeout on the operation
-		stream_.expires_after(std::chrono::seconds(30));
-
-		// Send the HTTP request to the remote host
-		http::async_write(stream_, req_,
-			beast::bind_front_handler(&http_session::on_write, shared_from_this()));
+		head_request(err);
+		post_request(err);
 	}
 
 	void on_write(beast::error_code err, std::size_t bytes_transferred)
@@ -129,16 +206,7 @@ public:
 			return report_failure(err, "read");
 		}
 		// Write the message to standard out
-		std::cout << res_ << std::endl;
-
-		// Gracefully close the socket
-		stream_.socket().shutdown(tcp::socket::shutdown_both, err);
-
-		// not_connected happens sometimes so don't bother reporting it.
-		if (err && err != beast::errc::not_connected)
-			return report_failure(err, "shutdown");
-
-		// If we get here then the connection is closed gracefully
+		std::cout << res_ << std::endl;		
 	}
 };
 
@@ -148,6 +216,15 @@ static int input_params_error() {
 		"Example:\n" <<
 		"    http_client --host=www.example.com --port=80 --keep-alive=10 --post-request=20 --reload=30 --request=request.json";
 	return EXIT_FAILURE;
+}
+
+static void update_req_buffer(net::io_context& ioc, unsigned short reload_secs)
+{
+	do {
+		std::this_thread::sleep_for(std::chrono::milliseconds(reload_secs * 1000));
+		cout << "update_req_buffer ";
+		req_buff_->reload();
+	} while (!ioc.stopped());
 }
 
 int main(int argc, char *argv[])
@@ -178,11 +255,22 @@ int main(int argc, char *argv[])
 		return input_params_error();
 	}
 
-	request_buffer req_buff(settings["request"].c_str());
-	if (!req_buff.good()) {
+	req_buff_ = make_unique<request_buffer>(settings["response"].c_str());
+	if (!req_buff_->good()) {
 		cerr << "bad path_to_request" << endl;
 		return input_params_error();
 	}
+
+	// The io_context is required for all I/O
+	net::io_context ioc;
+	thread tu(update_req_buffer, std::ref(ioc), reload_secs);
+	// Launch the asynchronous operation
+	std::make_shared<http_session>(ioc, keep_alive_secs, post_request_secs)->run(host.c_str(), port.c_str());
+
+	// Run the I/O service. The call will return when
+	// the get operation is complete.
+	ioc.run();
+	tu.join();
 	return EXIT_SUCCESS;
 }
 
