@@ -13,6 +13,7 @@
 #include <iostream>
 #include <memory>
 #include <fstream>
+#include <sstream>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -48,6 +49,32 @@ const map<string, string> _mimes = {
 	{".tif", "image/tiff"},
 	{".svg", "image/svg+xml"},
 	{".svgz", "image/svg+xml"}
+};
+
+class response_buffer {
+public:
+	response_buffer(const char* path) :
+		path_file_(path), pbuff_(new stringstream), pbuff_back_(new stringstream) {
+		reload();
+	}
+
+	const char* str() const { return pbuff_->str().c_str(); }
+	bool good() const { return good_; }
+	bool reload() {
+		ifstream t(path_file_);
+		if (good_ = t.good()) {
+			pbuff_back_->str("");
+			*pbuff_back_ << t.rdbuf();
+			swap(pbuff_, pbuff_back_);
+		}
+		return good_;
+	}
+
+private:
+	bool good_;
+	const char* path_file_;
+	unique_ptr<stringstream> pbuff_;
+	unique_ptr<stringstream> pbuff_back_;
 };
 
 beast::string_view mime_type(beast::string_view path)
@@ -350,9 +377,8 @@ int main(int argc, char *argv[])
 		return input_params_error();
 	}
 
-	const auto response_path(settings["response"]);
-	ifstream f(response_path.c_str());
-	if (!f.good()) {
+	response_buffer resp_buff(settings["response"].c_str());
+	if (!resp_buff.good()) {
 		cerr << "bad path_to_response" << endl;
 		return input_params_error();
 	}

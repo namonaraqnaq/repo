@@ -13,12 +13,39 @@
 #include <memory>
 #include <map>
 #include <string>
+#include <sstream>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
 using namespace std;
+
+class request_buffer {
+public:
+	request_buffer(const char* path) :	
+		path_file_(path), pbuff_(new stringstream),	pbuff_back_(new stringstream) {
+		reload();
+	}
+
+	const char* str() const { return pbuff_->str().c_str(); }
+	bool good() const { return good_; }
+	bool reload() {
+		ifstream t(path_file_);
+		if (good_ = t.good()) {
+			pbuff_back_->str("");
+			*pbuff_back_ << t.rdbuf();
+			swap(pbuff_, pbuff_back_);
+		}
+		return good_;
+	}
+
+private:
+	bool good_;
+	const char* path_file_;
+	unique_ptr<stringstream> pbuff_;
+	unique_ptr<stringstream> pbuff_back_;
+};
 
 static void report_failure(beast::error_code err, char const* src)
 {
@@ -151,13 +178,11 @@ int main(int argc, char *argv[])
 		return input_params_error();
 	}
 
-	const auto request_path(settings["request"]);
-	ifstream f(request_path.c_str());
-	if (!f.good()) {
+	request_buffer req_buff(settings["request"].c_str());
+	if (!req_buff.good()) {
 		cerr << "bad path_to_request" << endl;
 		return input_params_error();
 	}
-
 	return EXIT_SUCCESS;
 }
 
