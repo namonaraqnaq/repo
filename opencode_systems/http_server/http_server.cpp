@@ -2,6 +2,7 @@
 //
 //#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/date_time.hpp>
+#include <boost/exception/diagnostic_information.hpp> 
 #include <boost/regex.hpp> 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -28,6 +29,10 @@ namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 using namespace std;
+
+static void LOG(const char* what) {
+	cout << "------" << what << "\n";
+}
 
 class response_buffer {
 public:
@@ -96,36 +101,11 @@ public:
 	}
 } request_data_q_;
 
-// Append an HTTP rel-path to a local filesystem path.
-// The returned path is normalized for the platform.
-std::string path_cat(beast::string_view base, beast::string_view path)
-{
-	if (base.empty()) {
-		return std::string(path);
-	}
-	std::string result(base);
-#ifdef BOOST_MSVC
-	char constexpr path_separator = '\\';
-	if (result.back() == path_separator)
-		result.resize(result.size() - 1);
-	result.append(path.data(), path.size());
-	for (auto& c : result)
-		if (c == '/')
-			c = path_separator;
-#else
-	char constexpr path_separator = '/';
-	if (result.back() == path_separator)
-		result.resize(result.size() - 1);
-	result.append(path.data(), path.size());
-#endif
-	return result;
-}
-
 // Return a response for the given request.
 template <class Body, class Allocator>
-http::message_generator handle_request(	beast::string_view doc_root,
-										http::request<Body, http::basic_fields<Allocator>>&& req)
+http::message_generator handle_request(http::request<Body, http::basic_fields<Allocator>>&& req)
 {	
+	LOG("handle_request");
 	// Returns a bad request response
 	auto const bad_request = [&req](beast::string_view why) {
 		http::response<http::string_body> res{ http::status::bad_request, req.version() };
@@ -172,25 +152,25 @@ static void report_failure(beast::error_code err, char const* src)
 
 // Handles an HTTP server connection
 class http_session : public std::enable_shared_from_this<http_session>
-{
+{	
 	beast::tcp_stream stream_;
 	beast::flat_buffer buffer_;
-	std::shared_ptr<std::string const> doc_root_;
 	http::request<http::string_body> req_;
 	request_data rd_;
 
 public:
 	// Take ownership of the stream
-	http_session(tcp::socket&& socket, std::shared_ptr<std::string const> const& doc_root)
+	http_session(tcp::socket&& socket)
 		: stream_(std::move(socket))
-		, doc_root_(doc_root)
 	{
+		LOG("http_session constructor");
 		rd_.server_port_ = std::to_string(socket.local_endpoint().port());
 		rd_.client_port_ = std::to_string(socket.remote_endpoint().port());
 	}
 	// Start the asynchronous operation
 	void run()
 	{
+		LOG("http_session run");
 		// We need to be executing within a strand to perform async operations
 		// on the I/O objects in this session. Although not strictly necessary
 		// for single-threaded contexts, this example code is written to be
@@ -201,6 +181,7 @@ public:
 
 	void do_read()
 	{
+		LOG("http_session do_read");
 		// Make the request empty before reading, otherwise the operation behavior is undefined.
 		req_ = {};
 		// Set the timeout.
@@ -212,6 +193,7 @@ public:
 
 	void send_response(http::message_generator&& msg)
 	{
+		LOG("http_session send_response");
 		bool keep_alive = msg.keep_alive();
 		// Write the response
 		beast::async_write(	stream_,
@@ -221,6 +203,7 @@ public:
 
 	void on_read(beast::error_code ec, std::size_t bytes_transferred)
 	{
+		LOG("http_session on_read");
 		boost::ignore_unused(bytes_transferred);
 		// This means they closed the connection
 		if (ec == http::error::end_of_stream)
@@ -234,11 +217,12 @@ public:
 		request_data_q_.push(rd_);
 
 		// Send the response
-		send_response(handle_request(*doc_root_, std::move(req_)));
+		send_response(handle_request(std::move(req_)));
 	}	
 
 	void on_write(bool keep_alive, beast::error_code ec, std::size_t bytes_transferred)
 	{
+		LOG("http_session on_write");
 		boost::ignore_unused(bytes_transferred);
 		if (ec)
 			return report_failure(ec, "write");
@@ -253,6 +237,7 @@ public:
 
 	void do_close()
 	{
+		LOG("http_session do_close");
 		// Send a TCP shutdown
 		beast::error_code ec;
 		stream_.socket().shutdown(tcp::socket::shutdown_send, ec);
@@ -265,16 +250,14 @@ class listener : public std::enable_shared_from_this<listener>
 {
 	net::io_context& ioc_;
 	tcp::acceptor acceptor_;
-	shared_ptr<string const> doc_root_;
 	
 public:
 	listener(	net::io_context& ioc, 
-				tcp::endpoint endpoint, 
-				shared_ptr<string const> const& doc_root)
+				tcp::endpoint endpoint)
 		: ioc_(ioc)
 		, acceptor_(net::make_strand(ioc))
-		, doc_root_(doc_root)
 	{
+		LOG("listener constructor");
 		beast::error_code ec;
 		// Open the acceptor
 		acceptor_.open(endpoint.protocol(), ec);
@@ -305,12 +288,14 @@ public:
 	// Start accepting incoming connections
 	void run()
 	{
+		LOG("listener run");
 		do_accept();
 	}
 
 private:
 	void do_accept()
 	{
+		LOG("listener do_accept");
 		// The new connection gets its own strand
 		acceptor_.async_accept(	net::make_strand(ioc_),
 								beast::bind_front_handler(&listener::on_accept, shared_from_this()));
@@ -318,12 +303,13 @@ private:
 
 	void on_accept(beast::error_code ec, tcp::socket socket)
 	{
+		LOG("listener on_accept");
 		if (ec) {
 			report_failure(ec, "accept");
 			return; // To avoid infinite loop
 		} 
 		// Create the session and run it
-		std::make_shared<http_session>(std::move(socket), doc_root_)->run();
+		std::make_shared<http_session>(std::move(socket))->run();
 		// Accept another connection
 		do_accept();
 	}
@@ -339,19 +325,21 @@ static int input_params_error() {
 
 static void update_resp_buffer(net::io_context& ioc, unsigned short reload_secs)
 {
+	LOG("update_resp_buffer");
 	do {
 		std::this_thread::sleep_for(std::chrono::milliseconds(reload_secs*1000));
-		cout << "update_resp_buffer ";
 		resp_buff_->reload();
 	} while (!ioc.stopped());
+	LOG("stopped update_resp_buffer");
 }
 
 static void write_responses(net::io_context& ioc) {
+	LOG("write_responses");
 	do {
-		request_data_q_.pop();
-		cout << "write_responses ";
+		request_data_q_.pop();		
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	} while (!ioc.stopped());
+	LOG("stopped write_responses");
 }
 
 int main(int argc, char *argv[])
@@ -374,7 +362,6 @@ int main(int argc, char *argv[])
 	}	
 	const auto port = static_cast<unsigned short>(atoi(settings["port"].c_str()));
 	auto const address = net::ip::make_address("127.0.0.1");
-	auto const doc_root = std::make_shared<std::string>(".");
 
 	const auto reload_secs = atoi(settings["reload"].c_str());
 	if (reload_secs <= 0) {
@@ -385,19 +372,20 @@ int main(int argc, char *argv[])
 		cerr << "bad path_to_response" << endl;
 		return input_params_error();
 	}
-	
-	net::io_context ioc;	
-	thread tw(write_responses, std::ref(ioc));
-	thread tu(update_resp_buffer, std::ref(ioc), reload_secs);
-	// Create and launch a listening port
-	std::make_shared<listener>(
-		ioc,
-		tcp::endpoint{ address, port },
-		doc_root)->run();
-	ioc.run();
-	tw.join();
-	tu.join();	
-
+	try {
+		net::io_context ioc;
+		thread tw(write_responses, std::ref(ioc));
+		thread tu(update_resp_buffer, std::ref(ioc), reload_secs);
+		// Create and launch a listening port
+		std::make_shared<listener>(
+			ioc,
+			tcp::endpoint{ address, port })->run();
+		ioc.run();
+	} catch (std::exception const&  ex) {
+		cerr << ex.what();
+	} catch (const boost::exception& be) {
+		cerr << diagnostic_information(be);
+	}
 	return EXIT_SUCCESS;
 }
 

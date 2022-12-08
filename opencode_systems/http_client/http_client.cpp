@@ -1,6 +1,7 @@
 // http_client.cpp : This file contains the 'main' function. Program execution begins and ends there.
 // and implements asynchronous http client 
 //
+#include <boost/exception/diagnostic_information.hpp> 
 #include <boost/asio.hpp>
 #include <boost/bind.hpp>
 #include <boost/asio/strand.hpp>
@@ -22,6 +23,10 @@ namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
 using namespace std;
+
+static void LOG(const char* what) {
+	cout << "------" << what << "\n";
+}
 
 class request_buffer {
 public:
@@ -81,11 +86,13 @@ public:
 		, stream_(net::make_strand(ioc))
 		, ioc_(ioc)
 	{
+		LOG("http_session constructor");
 	}
 
 	// Start the asynchronous operation
 	void run(char const* host, char const* port)
 	{
+		LOG("http_session run");
 		// Set up an HTTP GET request message
 		std::string const payload("keep_alive");
 		post_req_.content_length(payload.size());
@@ -110,6 +117,7 @@ public:
 
 	void on_resolve(beast::error_code err, tcp::resolver::results_type results)
 	{
+		LOG("http_session on_resolve");
 		if (err) {
 			return report_failure(err, "resolve");
 		}
@@ -122,12 +130,14 @@ public:
 	}
 
 	void do_head_request() {
+		LOG("http_session do_head_request");
 		net::deadline_timer tmr(ioc_, boost::posix_time::seconds(15));
 		tmr.async_wait(beast::bind_front_handler(&http_session::head_request, shared_from_this()));
 		//tmr.async_wait(boost::bind(&http_session::post_request, this, boost::asio::placeholders::error));
 	}
 
 	void head_request(beast::error_code err) {
+		LOG("http_session head_request");
 		if (err) {
 			report_failure(err, "head request");
 			// Close the socket
@@ -149,12 +159,14 @@ public:
 	}
 
 	void do_post_request() {
+		LOG("http_session do_post_request");
 		net::deadline_timer tmr(ioc_, boost::posix_time::seconds(5));
 		tmr.async_wait(beast::bind_front_handler(&http_session::post_request, shared_from_this()));
 		//tmr.async_wait(boost::bind(&http_session::post_request, this, boost::asio::placeholders::error));
 	}
 
 	void post_request(beast::error_code err) {
+		LOG("http_session post_request");
 		if (err) {
 			report_failure(err, "post request");
 			// Close the socket
@@ -181,6 +193,7 @@ public:
 
 	void on_connect(beast::error_code err, tcp::resolver::results_type::endpoint_type)
 	{
+		LOG("http_session on_connect");
 		if (err) {
 			return report_failure(err, "connect");
 		}
@@ -190,6 +203,7 @@ public:
 
 	void on_write(beast::error_code err, std::size_t bytes_transferred)
 	{
+		LOG("http_session on_write");
 		boost::ignore_unused(bytes_transferred);
 		if (err) {
 			return report_failure(err, "write");
@@ -201,6 +215,7 @@ public:
 
 	void on_read(beast::error_code err, std::size_t bytes_transferred)
 	{
+		LOG("http_session on_read");
 		boost::ignore_unused(bytes_transferred);
 		if (err) {
 			return report_failure(err, "read");
@@ -220,9 +235,9 @@ static int input_params_error() {
 
 static void update_req_buffer(net::io_context& ioc, unsigned short reload_secs)
 {
+	LOG("update_req_buffer on_read");
 	do {
 		std::this_thread::sleep_for(std::chrono::milliseconds(reload_secs * 1000));
-		cout << "update_req_buffer ";
 		req_buff_->reload();
 	} while (!ioc.stopped());
 }
@@ -255,22 +270,28 @@ int main(int argc, char *argv[])
 		return input_params_error();
 	}
 
-	req_buff_ = make_unique<request_buffer>(settings["response"].c_str());
+	req_buff_ = make_unique<request_buffer>(settings["request"].c_str());
 	if (!req_buff_->good()) {
 		cerr << "bad path_to_request" << endl;
 		return input_params_error();
 	}
 
 	// The io_context is required for all I/O
+	try {
 	net::io_context ioc;
 	thread tu(update_req_buffer, std::ref(ioc), reload_secs);
 	// Launch the asynchronous operation
 	std::make_shared<http_session>(ioc, keep_alive_secs, post_request_secs)->run(host.c_str(), port.c_str());
-
 	// Run the I/O service. The call will return when
 	// the get operation is complete.
 	ioc.run();
-	tu.join();
+	} catch (std::exception const&  ex) {
+		cerr << ex.what();
+	} catch (const boost::exception& be) {
+		cerr << diagnostic_information(be);
+	} catch (...) {
+		LOG("BOOM");
+	}
 	return EXIT_SUCCESS;
 }
 
